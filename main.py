@@ -45,6 +45,29 @@ _entry_close = 0     # close at the bar the current position was decided on
 _took_tp1 = False    # True once the first half has been sold
 
 
+def _dip_bps(close, ema):
+    """Bps the close sits below the EMA; 0 when at or above it."""
+    if ema is None or ema <= close:
+        return 0
+    return (ema - close) * BPS // ema
+
+
+def _exit_kind(entry_close, close, took_tp1):
+    """Which exit fires on this bar: 'stop', 'tp2', 'tp1', or 'none'.
+
+    Order matters: the stop is checked first, then the second take
+    (only once the first half is gone), then the first take.
+    """
+    ret = (close - entry_close) * BPS // entry_close
+    if ret <= -STOP_BPS:
+        return "stop"
+    if took_tp1 and ret >= TP2_BPS:
+        return "tp2"
+    if not took_tp1 and ret >= TP1_BPS:
+        return "tp1"
+    return "none"
+
+
 def on_batch(state, batch):
     global _ema, _bars_seen, _entry_close, _took_tp1
 
@@ -78,7 +101,7 @@ def on_batch(state, batch):
             return []
         if state.seq >= last_entry_seq:
             return []
-        dip = (_ema - close) * BPS // _ema if _ema > close else 0
+        dip = _dip_bps(close, _ema)
         if dip >= DIP_BPS and state.cash > 0:
             _entry_close = close
             return [{"side": "buy", "symbol": SYMBOL,
@@ -87,14 +110,11 @@ def on_batch(state, batch):
         return []
 
     # We hold a position: manage the exit.
-    ret = (close - _entry_close) * BPS // _entry_close
-    if ret <= -STOP_BPS:
+    kind = _exit_kind(_entry_close, close, _took_tp1)
+    if kind in ("stop", "tp2"):
         return [{"side": "sell", "symbol": SYMBOL, "qty": qty,
                  "max_slippage_bps": MAX_SLIPPAGE_BPS}]
-    if _took_tp1 and ret >= TP2_BPS:
-        return [{"side": "sell", "symbol": SYMBOL, "qty": qty,
-                 "max_slippage_bps": MAX_SLIPPAGE_BPS}]
-    if not _took_tp1 and ret >= TP1_BPS:
+    if kind == "tp1":
         half = qty // 2
         if (state.value(SYMBOL, half, close) >= 1000000
                 and state.value(SYMBOL, qty - half, close) >= 1000000):
